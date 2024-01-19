@@ -1,35 +1,180 @@
 import { useSession, useSupabaseClient } from '@supabase/auth-helpers-react';
+import { useState, useEffect } from 'react';
+
+const GPT_KEY = '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';  // secure -> environment variable
 
 function App() {
   const session = useSession(); // tokens
-  const supabase = useSupabaseClient(); // talk to  supabase
+  const supabase = useSupabaseClient(); // talk to  supabase  
+  const [syllabusText, setSyllabusText] = useState('');
+  const [options, setOptions] = useState([]);
+  const [selectedOptions, setSelectedOptions] = useState([]);
+  const [newCalendarName, setNewCalendarName] = useState('');
+
+  useEffect(() => {
+    // Update selected options once when options change
+    setSelectedOptions(options.filter((option) => option['due date'] !== 'null'));
+  }, [options]);
   
-  async function createCalenderEvent() {
-    const event = {
-      'summary': 'Google I/O 2015',
-      'location': '800 Howard St., San Francisco, CA 94103',
-      'description': 'A chance to hear more about Google\'s developer products.',
-      'start': {
-        'dateTime': '2024-01-28T09:00:00-07:00',
-        'timeZone': 'America/Los_Angeles'
-      },
-      'end': {
-        'dateTime': '2024-01-28T17:00:00-07:00',
-        'timeZone': 'America/Los_Angeles'
-      }
-    };
-  
-    await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+  const handleTextChange = (event) => {
+    setSyllabusText(event.target.value);
+  };
+
+  const handleNewCalendarNameChange = (event) => {
+    setNewCalendarName(event.target.value);
+  };
+
+  async function callOpenAIAPI() {
+    console.log('Testing GPT API:');
+    // Use GPT-3 to analyze the syllabus and extract important dates
+    const APIBody = {
+      model: 'gpt-3.5-turbo', // You can experiment with different engines
+      messages: [{"role": "system", "content": 
+                  `You are a syllabus reader that can find important dates in syllabus in various format
+                  like schedule table, bullet points, etc.`},
+                {"role": "user", "content": 
+                  `As a student perspective, extract important events from syllabus in the form of csv where first column is event name(string)
+                  and second column is due date (in the form of yyyy-mm-dd). For example: 
+                  event name, due date
+                  event1, 2024-01-29
+
+                  If there is no due date specified for an event, leave the due date as null, no need to include time. Below is the syllabus:\n${syllabusText}`
+                }],
+      max_tokens: 300,  // Customize based on the desired length of the GPT-3 response
+      seed: 12345
+    }
+
+    await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        'Authorization': 'Bearer ' + session.provider_token // access token to google
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + GPT_KEY
       },
-      body: JSON.stringify(event)
+      body: JSON.stringify(APIBody)
     }).then((data) => {
       return data.json();
     }).then((data) => {
       console.log(data);
-    })
+      console.log(data.choices[0].message.content.trim());
+      const parsedOptions = parseCSV(data.choices[0].message.content.trim());
+      setOptions(parsedOptions);
+    });
+  }
+
+  function parseCSV(csv) {
+    const lines = csv.split('\n');
+    const headers = lines[0].split(',').map(header => header.trim());
+    const parsedOptions = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const values = lines[i].split(',').map(value => value.trim());
+      const option = {};
+
+      for (let j = 0; j < headers.length; j++) {
+        option[headers[j]] = values[j];
+      }
+
+      parsedOptions.push(option);
+    }
+
+    return parsedOptions;
+  }
+
+  const handleCheckboxChange = (event, option) => {
+    if (event.target.checked) {
+      setSelectedOptions([...selectedOptions, option]);
+    } else {
+      setSelectedOptions(selectedOptions.filter((selectedOption) => selectedOption !== option));
+    }
+  };
+
+  function displayOptions() {
+    return (
+      <div>
+        <h3>Select dates to add to your calendar:</h3>
+        <ul>
+          {options.map((option, index) => (
+            <li key={index}>
+              <input
+                type="checkbox"
+                id={`checkbox_${index}`}
+                checked={selectedOptions.includes(option)}
+                onChange={(event) => handleCheckboxChange(event, option)}
+                disabled={option['due date'] === 'null'}
+              />
+              <label htmlFor={`checkbox_${index}`}>
+                {`${option['event name']}: ${option['due date'] === 'null' ? 'TBD' : option['due date'] || 'No Due Date'}`}
+              </label>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+  
+  async function createCalenderEvent() {
+    // Check if there are selected options
+    if (selectedOptions.length === 0) {
+      console.log('No events selected.');
+      return;
+    }
+
+    // Check new calendar name
+    if (!newCalendarName) {
+      console.log('Please enter a new calendar name.');
+      return;
+    }
+
+    const calendar = {
+      summary:newCalendarName
+    }
+
+    let newCalendarId;
+    // Create new Calendar
+    await fetch('https://www.googleapis.com/calendar/v3/calendars', {
+      method: "POST",
+      headers: {
+        'Authorization': 'Bearer ' + session.provider_token // access token to Google
+      },
+      body: JSON.stringify(calendar)
+    }).then(data => data.json())
+      .then(result => {
+      console.log(result);
+      console.log(`Calendar ${calendar.summary} added. ID: ${result.id}`);
+      // Now you can use result.id as the newCalendarID
+      newCalendarId = result.id;
+    });
+  
+
+    // Create events from selected options
+    const events = selectedOptions.map((option, index) => {
+      return {
+        'summary': option['event name'],
+        'location': '',
+        'description': '',
+        'start': {
+          'date': option['due date'],
+          'timeZone': Intl.DateTimeFormat().resolvedOptions().timeZone, // You can customize this
+        },
+        'end': {
+          'date': option['due date'],
+          'timeZone': Intl.DateTimeFormat().resolvedOptions().timeZone, // You can customize this
+        }
+      };
+    });
+  
+    // Add events to the calendar
+    for (const event of events) {
+      await fetch(`https://www.googleapis.com/calendar/v3/calendars/${newCalendarId}/events`, {
+        method: "POST",
+        headers: {
+          'Authorization': 'Bearer ' + session.provider_token // access token to Google
+        },
+        body: JSON.stringify(event)
+      }).then((data) => {
+        console.log(`Event ${event.summary} added to the calendar.`);
+      });
+    }
   }
 
   async function googleSignIn() {
@@ -49,14 +194,25 @@ function App() {
     await supabase.auth.signOut();
   }
 
-  console.log(session);
   return (
     <div className='App'>
       {session ? 
         <>
           <h2>Hey there {session.user.email}</h2>
+          <textarea
+            placeholder="Paste your syllabus here..."
+            value={syllabusText}
+            onChange={handleTextChange}
+          />
+          <textarea
+            placeholder="Paste your Calendar name here..."
+            value={newCalendarName}
+            onChange={handleNewCalendarNameChange}
+          />
+          <button onClick={callOpenAIAPI}>Generate Response</button>
           <button onClick= {() => createCalenderEvent()}>Create Event</button>
           <button onClick={() => signOut()}> Sign Out</button>
+          {options.length > 0 && displayOptions()}
         </>
         :
         <>
